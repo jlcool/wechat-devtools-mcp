@@ -1,10 +1,10 @@
 {
-  "name": "wechat-devtools-mcp",
+  "name": "@jlcool/wechat-devtools-mcp",
   "type": "module",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "packageManager": "pnpm@10.6.2",
   "description": "微信开发者工具自动化的MCP服务",
-  "author": "FliPPeDround <flippedround@qq.com>",
+  "author": "jlcool <jiangliang.net@gmail.com>",
   "license": "MIT",
   "funding": "https://afdian.com/a/flippedround",
   "homepage": "https://github.com/flippedround/wechat-devtools-mcp#readme",

@@ -33,7 +33,7 @@ export interface LaunchOptions {
 }
 
 export class Automator {
-  private static readonly MAX_LOGS = 100
+  private static readonly MAX_LOGS = 1000
   public miniProgram: MiniProgram | null = null
   private consoleLogs: ConsoleLog[] = []
   private exceptionLogs: Exception[] = []
@@ -60,14 +60,20 @@ export class Automator {
   async launch() {
     this.miniProgram = await automator.launch(this.options)
     console.error(this.miniProgram)
+    this.consoleListenerStarted = false
+    this.exceptionListenerStarted = false
     this.startConsoleListener()
+    this.startExceptionListener()
   }
 
   async connect() {
     this.miniProgram = await automator.connect({
       wsEndpoint: `ws://localhost:${this.options.port}`,
     })
+    this.consoleListenerStarted = false
+    this.exceptionListenerStarted = false
     this.startConsoleListener()
+    this.startExceptionListener()
   }
 
   startConsoleListener() {
@@ -147,7 +153,7 @@ export class Automator {
       ({ type = 'log', limit = Automator.MAX_LOGS }) => ({
         content: this.consoleLogs
           .filter(log => log.type === type)
-          .slice(0, limit)
+          .slice(-limit)
           .map(log => ({
             type: 'text',
             text: `${log.time} ${log.type}: ${log.args.map(arg => JSON.stringify(arg)).join(' ')}`,
@@ -168,7 +174,7 @@ export class Automator {
       },
       ({ limit = Automator.MAX_LOGS }) => ({
         content: this.exceptionLogs
-          .slice(0, limit)
+          .slice(-limit)
           .map(log => ({
             type: 'text',
             text: `${log.time} ${log.name}: ${log.stack}`,
