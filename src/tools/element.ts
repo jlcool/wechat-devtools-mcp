@@ -19,17 +19,12 @@ export class ElementTool {
       throw new Error('当前没有打开的页面')
     }
 
-    const selectors = selector.trim().split(/\s+/)
-    let current: any = page
-
-    for (const sel of selectors) {
-      current = await current.$(sel)
-      if (!current) {
-        throw new Error(`未找到元素: ${sel}`)
-      }
+    const element = await page.$(selector)
+    if (!element) {
+      throw new Error(`未找到元素: ${selector}`)
     }
 
-    return current
+    return element
   }
 
   getElementChild() {
