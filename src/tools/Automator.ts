@@ -32,13 +32,32 @@ export interface LaunchOptions {
   ticket?: string
 }
 
+function safeStringify(arg: unknown): string {
+  const seen = new WeakSet()
+  try {
+    return JSON.stringify(arg, (_, value) => {
+      if (typeof value === 'object' && value !== null) {
+        if (seen.has(value))
+          return '[Circular]'
+        seen.add(value)
+      }
+      return value
+    })
+  }
+  catch {
+    return String(arg)
+  }
+}
+
 export class Automator {
   private static readonly MAX_LOGS = 1000
+  private static readonly ENABLE_LOG_INTERVAL = 3000
   public miniProgram: MiniProgram | null = null
   private consoleLogs: ConsoleLog[] = []
   private exceptionLogs: Exception[] = []
   private consoleListenerStarted = false
   private exceptionListenerStarted = false
+  private enableLogTimer: ReturnType<typeof setInterval> | null = null
 
   private getTimeString(): string {
     const now = new Date()
@@ -62,25 +81,32 @@ export class Automator {
     console.error(this.miniProgram)
     this.consoleListenerStarted = false
     this.exceptionListenerStarted = false
+    this.consoleLogs = []
+    this.exceptionLogs = []
     this.startConsoleListener()
     this.startExceptionListener()
+    this.setupAutoReconnect()
   }
 
-  async connect() {
+  async connect(clearLogs = true) {
     this.miniProgram = await automator.connect({
       wsEndpoint: `ws://localhost:${this.options.port}`,
     })
     this.consoleListenerStarted = false
     this.exceptionListenerStarted = false
+    if (clearLogs) {
+      this.consoleLogs = []
+      this.exceptionLogs = []
+    }
     this.startConsoleListener()
     this.startExceptionListener()
+    this.setupAutoReconnect()
   }
 
   startConsoleListener() {
     if (!this.miniProgram || this.consoleListenerStarted)
       return
     this.consoleListenerStarted = true
-    this.consoleLogs = []
     this.miniProgram.on('console', (msg) => {
       this.consoleLogs.push({
         type: msg.type,
@@ -91,13 +117,18 @@ export class Automator {
         this.consoleLogs.shift()
       }
     })
+    // 热重载后 runtime 重置，App.enableLog 需要重新发送才能恢复日志转发
+    if (this.enableLogTimer)
+      clearInterval(this.enableLogTimer)
+    this.enableLogTimer = setInterval(() => {
+      (this.miniProgram as any)?.send('App.enableLog').catch(() => {})
+    }, Automator.ENABLE_LOG_INTERVAL)
   }
 
   startExceptionListener() {
     if (!this.miniProgram || this.exceptionListenerStarted)
       return
     this.exceptionListenerStarted = true
-    this.exceptionLogs = []
     this.miniProgram.on('exception', (msg) => {
       this.exceptionLogs.push({
         name: msg.name,
@@ -107,6 +138,31 @@ export class Automator {
       if (this.exceptionLogs.length > Automator.MAX_LOGS) {
         this.exceptionLogs.shift()
       }
+    })
+  }
+
+  setupAutoReconnect() {
+    if (!this.miniProgram)
+      return
+    // MiniProgram 不 emit disconnect，需要从底层 transport 的 close 事件监听
+    const transport = (this.miniProgram as any)?.connection?.transport
+    if (!transport)
+      return
+    transport.once('close', () => {
+      this.consoleListenerStarted = false
+      this.exceptionListenerStarted = false
+      const retry = async (attempts: number = 10): Promise<void> => {
+        if (attempts <= 0)
+          return
+        try {
+          await this.connect(false)
+        }
+        catch {
+          await new Promise(r => setTimeout(r, 2000))
+          await retry(attempts - 1)
+        }
+      }
+      retry()
     })
   }
 
@@ -146,17 +202,17 @@ export class Automator {
         title: '获取日志',
         description: '获取小程序运行时的控制台日志，包括 console.log、console.info、console.warn、console.error 等。可用于调试小程序异常或查看业务流程日志。',
         inputSchema: {
-          type: z.string().default('log').describe('日志类型，可选 log、info、warn、error、debug'),
+          type: z.string().default('log').describe('日志类型，可选 log、info、warn、error、debug、all（all 表示返回所有类型）'),
           limit: z.number().max(Automator.MAX_LOGS).min(1).default(Automator.MAX_LOGS).describe('返回的日志数量限制'),
         },
       },
       ({ type = 'log', limit = Automator.MAX_LOGS }) => ({
         content: this.consoleLogs
-          .filter(log => log.type === type)
+          .filter(log => type === 'all' || log.type === type)
           .slice(-limit)
           .map(log => ({
             type: 'text',
-            text: `${log.time} ${log.type}: ${log.args.map(arg => JSON.stringify(arg)).join(' ')}`,
+            text: `${log.time} ${log.type}: ${log.args.map(arg => safeStringify(arg)).join(' ')}`,
           })),
       }),
     )
