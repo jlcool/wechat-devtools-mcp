@@ -5,8 +5,9 @@ import z from 'zod'
 
 interface ConsoleLog {
   type: string
-  args: unknown[]
+  args: string[]
   time: string
+  hash: string
 }
 
 interface Exception {
@@ -67,11 +68,20 @@ export class Automator {
     return `${hours}:${minutes}:${seconds}`
   }
 
+  private isConnectionAlive(): boolean {
+    if (!this.miniProgram)
+      return false
+    const ws = (this.miniProgram as any)?.connection?.transport?.ws
+    // WebSocket.OPEN = 1
+    return ws?.readyState === 1
+  }
+
   constructor(
     private options: LaunchOptions,
     private server: McpServer,
   ) {
     this.registerLaunch()
+    this.registerReconnect()
     this.registerLogs()
     this.registerExceptions()
   }
@@ -108,16 +118,21 @@ export class Automator {
       return
     this.consoleListenerStarted = true
     this.miniProgram.on('console', (msg) => {
+      const args = (msg.args as unknown[] ?? []).map(arg => safeStringify(arg))
+      const hash = `${msg.type}-${args.join('|')}`
+      if (this.consoleLogs.some(log => log.hash === hash))
+        return
       this.consoleLogs.push({
         type: msg.type,
-        args: msg.args,
+        args,
         time: this.getTimeString(),
+        hash,
       })
       if (this.consoleLogs.length > Automator.MAX_LOGS) {
         this.consoleLogs.shift()
       }
     })
-    // 热重载后 runtime 重置，App.enableLog 需要重新发送才能恢复日志转发
+    // 热重载后 runtime 重置，App.enableLog 需要重新发送才能恢复日志和异常转发
     if (this.enableLogTimer)
       clearInterval(this.enableLogTimer)
     this.enableLogTimer = setInterval(() => {
@@ -139,6 +154,8 @@ export class Automator {
         this.exceptionLogs.shift()
       }
     })
+    // App.enableLog 可能同时启用所有 App 级事件（包括 exceptionThrown），补发一次确保异常转发已开启
+    ;(this.miniProgram as any)?.send('App.enableLog').catch(() => {})
   }
 
   setupAutoReconnect() {
@@ -151,15 +168,14 @@ export class Automator {
     transport.once('close', () => {
       this.consoleListenerStarted = false
       this.exceptionListenerStarted = false
-      const retry = async (attempts: number = 10): Promise<void> => {
-        if (attempts <= 0)
-          return
+      // 指数退避无限重试，直到重连成功为止
+      const retry = async (delay: number = 1000): Promise<void> => {
         try {
           await this.connect(false)
         }
         catch {
-          await new Promise(r => setTimeout(r, 2000))
-          await retry(attempts - 1)
+          await new Promise(r => setTimeout(r, delay))
+          await retry(Math.min(delay * 2, 30000))
         }
       }
       retry()
@@ -195,6 +211,36 @@ export class Automator {
     )
   }
 
+  registerReconnect() {
+    this.server.registerTool(
+      'reconnect',
+      {
+        title: '重新连接开发者工具',
+        description: '重新连接到已运行的微信开发者工具，不重启进程。适用于热重载或连接断开后的恢复。如果 getlogs 或 getexceptions 提示连接断开，请调用此工具。',
+      },
+      async () => {
+        try {
+          await this.connect(false)
+          return {
+            content: [{
+              type: 'text',
+              text: '重新连接成功，日志和异常监听已恢复。',
+            }],
+          }
+        }
+        catch (error) {
+          return {
+            content: [{
+              type: 'text',
+              text: `重新连接失败: ${error}`,
+            }],
+            isError: true,
+          }
+        }
+      },
+    )
+  }
+
   registerLogs() {
     this.server.registerTool(
       'getlogs',
@@ -202,19 +248,34 @@ export class Automator {
         title: '获取日志',
         description: '获取小程序运行时的控制台日志，包括 console.log、console.info、console.warn、console.error 等。可用于调试小程序异常或查看业务流程日志。',
         inputSchema: {
-          type: z.string().default('log').describe('日志类型，可选 log、info、warn、error、debug、all（all 表示返回所有类型）'),
-          limit: z.number().max(Automator.MAX_LOGS).min(1).default(Automator.MAX_LOGS).describe('返回的日志数量限制'),
+          type: z.string().default('all').describe('日志类型，可选 log、info、warn、error、debug、all（all 表示返回所有类型）'),
+          limit: z.number().max(Automator.MAX_LOGS).min(1).default(20).describe('返回的日志数量限制'),
         },
       },
-      ({ type = 'log', limit = Automator.MAX_LOGS }) => ({
-        content: this.consoleLogs
-          .filter(log => type === 'all' || log.type === type)
-          .slice(-limit)
-          .map(log => ({
-            type: 'text',
-            text: `${log.time} ${log.type}: ${log.args.map(arg => safeStringify(arg)).join(' ')}`,
-          })),
-      }),
+      ({ type = 'all', limit = 20 }) => {
+        if (!this.miniProgram) {
+          return {
+            content: [{ type: 'text' as const, text: '错误：未连接到小程序，请先使用 launch 工具启动并连接。' }],
+            isError: true,
+          }
+        }
+        if (!this.isConnectionAlive()) {
+          return {
+            content: [{ type: 'text' as const, text: '错误：与开发者工具的连接已断开（可能正在热重载），请使用 reconnect 工具重新连接后再试。' }],
+            isError: true,
+          }
+        }
+        return {
+          content: this.consoleLogs
+            .filter(log => type === 'all' || log.type === type)
+            .slice(-limit)
+            .reverse()
+            .map(log => ({
+              type: 'text' as const,
+              text: `${log.time} ${log.type}: ${log.args.join(' ')}`,
+            })),
+        }
+      },
     )
   }
 
@@ -228,14 +289,28 @@ export class Automator {
           limit: z.number().max(Automator.MAX_LOGS).min(1).default(Automator.MAX_LOGS).describe('返回的异常数量限制'),
         },
       },
-      ({ limit = Automator.MAX_LOGS }) => ({
-        content: this.exceptionLogs
-          .slice(-limit)
-          .map(log => ({
-            type: 'text',
-            text: `${log.time} ${log.name}: ${log.stack}`,
-          })),
-      }),
+      ({ limit = Automator.MAX_LOGS }) => {
+        if (!this.miniProgram) {
+          return {
+            content: [{ type: 'text' as const, text: '错误：未连接到小程序，请先使用 launch 工具启动并连接。' }],
+            isError: true,
+          }
+        }
+        if (!this.isConnectionAlive()) {
+          return {
+            content: [{ type: 'text' as const, text: '错误：与开发者工具的连接已断开（可能正在热重载），请使用 reconnect 工具重新连接后再试。' }],
+            isError: true,
+          }
+        }
+        return {
+          content: this.exceptionLogs
+            .slice(-limit)
+            .map(log => ({
+              type: 'text' as const,
+              text: `${log.time} ${log.name}: ${log.stack}`,
+            })),
+        }
+      },
     )
   }
 }
