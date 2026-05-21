@@ -1,7 +1,7 @@
 {
   "name": "@jlcool/wechat-devtools-mcp",
   "type": "module",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "packageManager": "pnpm@10.6.2",
   "description": "微信开发者工具自动化的MCP服务",
   "author": "jlcool <jiangliang.net@gmail.com>",
